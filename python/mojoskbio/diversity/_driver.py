@@ -44,7 +44,9 @@ _QUALITATIVE = {
 }
 
 
-def _matrix(counts, validate=True) -> np.ndarray:
+def _matrix(
+    counts, validate=True, *, preserve_int64=False, qualitative=False
+) -> np.ndarray:
     array = np.asarray(counts)
     if array.ndim > 2:
         raise ValueError(
@@ -60,6 +62,13 @@ def _matrix(counts, validate=True) -> np.ndarray:
             raise ValueError("Counts must be integers or floating-point numbers.")
         if array.size and array.min() < 0:
             raise ValueError("Counts cannot contain negative values.")
+    if qualitative:
+        return np.ascontiguousarray(array != 0, dtype=np.uint8)
+    if preserve_int64 and array.dtype == np.dtype(np.int64):
+        if array.size and array.max() > 2**53:
+            raise ValueError("Counts cannot be represented exactly as float64.")
+        if array.flags.c_contiguous and array.flags.aligned:
+            return array
     return f64(array)
 
 
@@ -149,14 +158,18 @@ def _alpha_spec(metric, kwargs):
 
 
 def alpha_diversity(metric, counts, ids=None, validate=True, **kwargs):
-    matrix = _matrix(counts, validate=validate)
-    sample_ids = _ids(ids, len(matrix))
     if callable(metric):
+        matrix = _matrix(counts, validate=validate)
+        sample_ids = _ids(ids, len(matrix))
         values = [metric(row, **kwargs) for row in matrix]
         return pd.Series(values, index=sample_ids)
     if not isinstance(metric, str):
         raise ValueError(f"Invalid metric provided: {metric!r}.")
     code, parameter1, parameter2, flag = _alpha_spec(metric, kwargs)
+    matrix = _matrix(
+        counts, validate=validate, preserve_int64=validate and code in (0, 6)
+    )
+    sample_ids = _ids(ids, len(matrix))
     result = np.empty(len(matrix), dtype=np.float64)
     if len(matrix) == 0:
         return pd.Series(result, index=sample_ids)
@@ -165,16 +178,27 @@ def alpha_diversity(metric, counts, ids=None, validate=True, **kwargs):
         columns = 0
     else:
         columns = matrix.shape[1]
-    lib().msb_alpha_batch(
-        addr(matrix, dtype=np.float64),
-        len(matrix),
-        columns,
-        addr(result, dtype=np.float64, writable=True),
-        code,
-        parameter1,
-        parameter2,
-        flag,
-    )
+    if matrix.dtype == np.dtype(np.int64) and code in (0, 6):
+        lib().msb_alpha_batch_i64(
+            addr(matrix, dtype=np.int64),
+            len(matrix),
+            columns,
+            addr(result, dtype=np.float64, writable=True),
+            code,
+            parameter1,
+            flag,
+        )
+    else:
+        lib().msb_alpha_batch(
+            addr(matrix, dtype=np.float64),
+            len(matrix),
+            columns,
+            addr(result, dtype=np.float64, writable=True),
+            code,
+            parameter1,
+            parameter2,
+            flag,
+        )
     if code in (0, 1, 2):
         result = result.astype(np.int64)
     return pd.Series(result, index=sample_ids)
@@ -188,7 +212,8 @@ def beta_diversity(
     pairwise_func=None,
     **kwargs,
 ):
-    matrix = _matrix(counts, validate=validate)
+    qualitative = isinstance(metric, str) and metric in _QUALITATIVE
+    matrix = _matrix(counts, validate=validate, qualitative=qualitative)
     sample_ids = _ids(ids, len(matrix), beta=True)
     if not matrix.size:
         return DistanceMatrix(np.zeros((len(matrix), len(matrix))), sample_ids)
@@ -205,21 +230,28 @@ def beta_diversity(
         return DistanceMatrix(result, sample_ids, validate=False)
     if not isinstance(metric, str) or metric not in _BETA_CODES:
         raise ValueError(f"Unknown Distance Metric: {metric}")
-    if metric in _QUALITATIVE:
-        matrix = np.ascontiguousarray(matrix != 0, dtype=np.float64)
     parameter = kwargs.pop("p", 2.0) if metric == "minkowski" else 0.0
     if kwargs:
         key = next(iter(kwargs))
         raise TypeError(f"got an unexpected keyword argument {key!r}")
     result = np.empty((len(matrix), len(matrix)), dtype=np.float64)
-    lib().msb_beta(
-        addr(matrix, dtype=np.float64),
-        len(matrix),
-        matrix.shape[1],
-        addr(result, dtype=np.float64, writable=True),
-        _BETA_CODES[metric],
-        float(parameter),
-    )
+    if qualitative:
+        lib().msb_beta_bool(
+            addr(matrix, dtype=np.uint8),
+            len(matrix),
+            matrix.shape[1],
+            addr(result, dtype=np.float64, writable=True),
+            _BETA_CODES[metric],
+        )
+    else:
+        lib().msb_beta(
+            addr(matrix, dtype=np.float64),
+            len(matrix),
+            matrix.shape[1],
+            addr(result, dtype=np.float64, writable=True),
+            _BETA_CODES[metric],
+            float(parameter),
+        )
     return DistanceMatrix(result, sample_ids, validate=False)
 
 

@@ -1,14 +1,18 @@
 """Sequence distance and ecological diversity kernels."""
 
+from max.algorithm import sync_parallelize
 from std.math import exp, log, pow, sqrt
-from std.sys.info import simd_width_of
+from std.sys.info import simd_width_of as simdwidthof
 
 comptime FPtr = UnsafePointer[Float64, AnyOrigin[mut=True]]
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
 comptime U64Ptr = UnsafePointer[UInt64, AnyOrigin[mut=True]]
 comptime I64Ptr = UnsafePointer[Int64, AnyOrigin[mut=True]]
-comptime BW = simd_width_of[DType.uint8]()
-comptime FW = simd_width_of[DType.float64]()
+comptime BW = simdwidthof[DType.uint8]()
+comptime FW = simdwidthof[DType.float64]()
+comptime IW = simdwidthof[DType.int64]()
+comptime ALPHA_PARALLEL_THRESHOLD = 262_144
+comptime BETA_PARALLEL_THRESHOLD = 1_048_576
 
 
 def fp(addr: Int) -> FPtr:
@@ -30,6 +34,100 @@ def i64p(addr: Int) -> I64Ptr:
 def nan_value() -> Float64:
     var zero = 0.0
     return zero / zero
+
+
+def alpha_observed_f64(counts: FPtr, n: Int) -> Float64:
+    var observed = SIMD[DType.int64, FW](0)
+    var i = 0
+    while i + FW <= n:
+        observed += counts.load[width=FW](i).gt(0.0).cast[DType.int64]()
+        i += FW
+    var total = Int(observed.reduce_add())
+    while i < n:
+        total += Int(counts[i] > 0.0)
+        i += 1
+    return Float64(total)
+
+
+def alpha_shannon_f64(
+    counts: FPtr, n: Int, base: Float64, exponential: Int
+) -> Float64:
+    var total = SIMD[DType.float64, FW](0.0)
+    var sum_count_log_count = SIMD[DType.float64, FW](0.0)
+    var observed = SIMD[DType.int64, FW](0)
+    var zeros = SIMD[DType.float64, FW](0.0)
+    var i = 0
+    while i + FW <= n:
+        var values = counts.load[width=FW](i)
+        var positive = values.gt(0.0)
+        total += positive.select(values, zeros)
+        sum_count_log_count += positive.select(values * log(values), zeros)
+        observed += positive.cast[DType.int64]()
+        i += FW
+    var total_sum = total.reduce_add()
+    var log_sum = sum_count_log_count.reduce_add()
+    var observed_count = Int(observed.reduce_add())
+    while i < n:
+        var value = counts[i]
+        if value > 0.0:
+            total_sum += value
+            log_sum += value * log(value)
+            observed_count += 1
+        i += 1
+    if observed_count == 0:
+        return nan_value()
+    var entropy = log(total_sum) - log_sum / total_sum
+    if exponential != 0:
+        return exp(entropy)
+    return entropy if base == 0.0 else entropy / log(base)
+
+
+def alpha_observed_i64(counts: I64Ptr, n: Int) -> Float64:
+    var observed = SIMD[DType.int64, IW](0)
+    var i = 0
+    while i + IW <= n:
+        observed += counts.load[width=IW](i).gt(0).cast[DType.int64]()
+        i += IW
+    var total = Int(observed.reduce_add())
+    while i < n:
+        total += Int(counts[i] > 0)
+        i += 1
+    return Float64(total)
+
+
+def alpha_shannon_i64(
+    counts: I64Ptr, n: Int, base: Float64, exponential: Int
+) -> Float64:
+    var total = SIMD[DType.float64, IW](0.0)
+    var sum_count_log_count = SIMD[DType.float64, IW](0.0)
+    var observed = SIMD[DType.int64, IW](0)
+    var zeros = SIMD[DType.float64, IW](0.0)
+    var i = 0
+    while i + IW <= n:
+        var integers = counts.load[width=IW](i)
+        var values = integers.cast[DType.float64]()
+        var positive = integers.gt(0)
+        total += values
+        sum_count_log_count += positive.select(values * log(values), zeros)
+        observed += positive.cast[DType.int64]()
+        i += IW
+    var total_sum = total.reduce_add()
+    var log_sum = sum_count_log_count.reduce_add()
+    var observed_count = Int(observed.reduce_add())
+    while i < n:
+        var integer = counts[i]
+        if integer > 0:
+            var value = Float64(integer)
+            total_sum += value
+            log_sum += value * log(value)
+            observed_count += 1
+        i += 1
+    if observed_count == 0:
+        return nan_value()
+    var entropy = log(total_sum) - log_sum / total_sum
+    if exponential != 0:
+        return exp(entropy)
+    return entropy if base == 0.0 else entropy / log(base)
 
 
 @export("msb_hamming")
@@ -185,6 +283,11 @@ def alpha_value(
     parameter2: Float64,
     flag: Int,
 ) -> Float64:
+    if code == 0:
+        return alpha_observed_f64(counts, n)
+    if code == 6:
+        return alpha_shannon_f64(counts, n, parameter1, flag)
+
     var total = 0.0
     var sum_squares = 0.0
     var sum_count_log_count = 0.0
@@ -206,8 +309,6 @@ def alpha_value(
             elif value == 2.0:
                 doubleton_count += 1
 
-    if code == 0:
-        return Float64(observed)
     if code == 1:
         return Float64(singleton_count)
     if code == 2:
@@ -330,13 +431,47 @@ def msb_alpha_batch(
     var counts = fp(counts_addr)
     var result = fp(result_addr)
 
-    def calculate(row: Int) {imm}:
+    @parameter
+    def calculate(row: Int):
         result[row] = alpha_value(
             counts + row * columns, columns, code, parameter1, parameter2, flag
         )
 
-    for row in range(rows):
-        calculate(row)
+    if rows * columns >= ALPHA_PARALLEL_THRESHOLD and rows > 1:
+        sync_parallelize[calculate](rows)
+    else:
+        for row in range(rows):
+            calculate(row)
+
+
+@export("msb_alpha_batch_i64")
+def msb_alpha_batch_i64(
+    counts_addr: Int,
+    rows: Int,
+    columns: Int,
+    result_addr: Int,
+    code: Int,
+    parameter1: Float64,
+    flag: Int,
+) abi("C"):
+    var counts = i64p(counts_addr)
+    var result = fp(result_addr)
+
+    @parameter
+    def calculate(row: Int):
+        var row_counts = counts + row * columns
+        if code == 0:
+            result[row] = alpha_observed_i64(row_counts, columns)
+        else:
+            result[row] = alpha_shannon_i64(
+                row_counts, columns, parameter1, flag
+            )
+
+    if rows * columns >= ALPHA_PARALLEL_THRESHOLD and rows > 1:
+        sync_parallelize[calculate](rows)
+    else:
+        for row in range(rows):
+            calculate(row)
 
 
 def braycurtis_pair(a: FPtr, b: FPtr, n: Int) -> Float64:
@@ -357,6 +492,64 @@ def braycurtis_pair(a: FPtr, b: FPtr, n: Int) -> Float64:
         denominator_sum += abs(a[i] + b[i])
         i += 1
     return numerator_sum / denominator_sum
+
+
+def qualitative_pair(a: BPtr, b: BPtr, n: Int, code: Int) -> Float64:
+    var both = 0
+    var neither = 0
+    var a_only = 0
+    var b_only = 0
+    var i = 0
+    if code == 9:
+        var union_count = SIMD[DType.int64, BW](0)
+        var difference_count = SIMD[DType.int64, BW](0)
+        while i + BW <= n:
+            var left = a.load[width=BW](i).ne(0)
+            var right = b.load[width=BW](i).ne(0)
+            union_count += (left | right).cast[DType.int64]()
+            difference_count += left.ne(right).cast[DType.int64]()
+            i += BW
+        var union_sum = Int(union_count.reduce_add())
+        var difference_sum = Int(difference_count.reduce_add())
+        while i < n:
+            var left = a[i] != 0
+            var right = b[i] != 0
+            union_sum += Int(left or right)
+            difference_sum += Int(left != right)
+            i += 1
+        if union_sum == 0:
+            return 0.0
+        return Float64(difference_sum) / Float64(union_sum)
+
+    for column in range(n):
+        var left = a[column] != 0
+        var right = b[column] != 0
+        if left and right:
+            both += 1
+        elif left:
+            a_only += 1
+        elif right:
+            b_only += 1
+        else:
+            neither += 1
+    if code == 11:
+        return Float64(a_only + b_only) / Float64(n)
+    if code == 10:
+        return Float64(a_only + b_only) / Float64(2 * both + a_only + b_only)
+    if code == 12:
+        var differences = a_only + b_only
+        return Float64(2 * differences) / Float64(both + neither + 2 * differences)
+    if code == 13:
+        return Float64(n - both) / Float64(n)
+    if code == 14:
+        return Float64(2 * (a_only + b_only)) / Float64(
+            both + 2 * (a_only + b_only)
+        )
+    if code == 15:
+        var cross = a_only * b_only
+        var denominator = both * neither + cross
+        return 0.0 if denominator == 0 else Float64(2 * cross) / Float64(denominator)
+    return nan_value()
 
 
 def beta_pair(a: FPtr, b: FPtr, n: Int, code: Int, parameter: Float64) -> Float64:
@@ -473,7 +666,8 @@ def msb_beta(
     var counts = fp(counts_addr)
     var result = fp(result_addr)
 
-    def calculate_row(row: Int) {imm}:
+    @parameter
+    def calculate_row(row: Int):
         result[row * rows + row] = 0.0
         for other in range(row + 1, rows):
             var value = beta_pair(
@@ -486,5 +680,41 @@ def msb_beta(
             result[row * rows + other] = value
             result[other * rows + row] = value
 
-    for row in range(rows):
-        calculate_row(row)
+    var pair_work = rows * (rows - 1) // 2 * columns
+    if pair_work >= BETA_PARALLEL_THRESHOLD and rows > 1:
+        sync_parallelize[calculate_row](rows)
+    else:
+        for row in range(rows):
+            calculate_row(row)
+
+
+@export("msb_beta_bool")
+def msb_beta_bool(
+    counts_addr: Int,
+    rows: Int,
+    columns: Int,
+    result_addr: Int,
+    code: Int,
+) abi("C"):
+    var counts = bp(counts_addr)
+    var result = fp(result_addr)
+
+    @parameter
+    def calculate_row(row: Int):
+        result[row * rows + row] = 0.0
+        for other in range(row + 1, rows):
+            var value = qualitative_pair(
+                counts + row * columns,
+                counts + other * columns,
+                columns,
+                code,
+            )
+            result[row * rows + other] = value
+            result[other * rows + row] = value
+
+    var pair_work = rows * (rows - 1) // 2 * columns
+    if pair_work >= BETA_PARALLEL_THRESHOLD and rows > 1:
+        sync_parallelize[calculate_row](rows)
+    else:
+        for row in range(rows):
+            calculate_row(row)

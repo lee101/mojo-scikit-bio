@@ -63,6 +63,30 @@ def test_braycurtis_simd_tail_and_parallel_threshold(rows, columns):
     )
 
 
+@pytest.mark.parametrize(
+    ("rows", "columns"),
+    [
+        (4, 71),
+        (128, 137),
+    ],
+)
+def test_jaccard_simd_tail_and_parallel_threshold(rows, columns):
+    rng = np.random.default_rng(rows + columns)
+    counts = rng.integers(0, 3, size=(rows, columns))
+    actual = beta_diversity("jaccard", counts)
+    expected = sk_beta_diversity("jaccard", counts)
+    assert np.allclose(
+        actual.data, expected.data, rtol=2e-8, atol=1e-11, equal_nan=True
+    )
+
+
+def test_jaccard_all_absent_parity():
+    counts = np.zeros((2, 7), dtype=np.int64)
+    actual = beta_diversity("jaccard", counts)
+    expected = sk_beta_diversity("jaccard", counts)
+    assert np.array_equal(actual.data, expected.data)
+
+
 def test_beta_callable_parity():
     counts = np.array([[1, 2], [3, 7], [0, 4]], dtype=float)
 

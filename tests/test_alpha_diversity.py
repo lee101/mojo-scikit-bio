@@ -95,6 +95,23 @@ def test_alpha_diversity_batch_parity(metric, kwargs):
     assert np.allclose(actual, expected, rtol=2e-8, atol=1e-11, equal_nan=True)
 
 
+@pytest.mark.parametrize("metric", ["observed_features", "shannon"])
+@pytest.mark.parametrize(
+    ("rows", "columns", "dtype"),
+    [
+        (5, 13, np.float64),
+        (5, 13, np.int64),
+        (2048, 137, np.int64),
+    ],
+)
+def test_alpha_simd_tail_and_parallel_threshold(metric, rows, columns, dtype):
+    rng = np.random.default_rng(rows + columns)
+    counts = rng.integers(0, 20, size=(rows, columns)).astype(dtype)
+    actual = alpha_diversity(metric, counts)
+    expected = sk_alpha_diversity(metric, counts)
+    assert np.allclose(actual, expected, rtol=2e-8, atol=1e-11, equal_nan=True)
+
+
 def test_alpha_diversity_callable_and_vector():
     metric = lambda row, scale=1: np.count_nonzero(row) * scale
     actual = alpha_diversity(metric, [1, 0, 2], scale=3)

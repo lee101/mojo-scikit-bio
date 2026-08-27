@@ -20,7 +20,9 @@ _SIGNATURES = {
     "msb_kmer_distance": ([I] * 11, F),
     "msb_alpha": ([I, I, I, F, F, I], F),
     "msb_alpha_batch": ([I, I, I, I, I, F, F, I], None),
+    "msb_alpha_batch_i64": ([I, I, I, I, I, F, I], None),
     "msb_beta": ([I, I, I, I, I, F], None),
+    "msb_beta_bool": ([I, I, I, I, I], None),
 }
 
 

@@ -110,16 +110,25 @@ were measured on an Intel Xeon E5-2697 v4 at 2.30 GHz, Linux
 
 | case | mojo-scikit-bio | scikit-bio | result |
 | --- | ---: | ---: | ---: |
-| hamming (5M bases) | 0.99 ms | 9.55 ms | 9.67x faster |
-| kmer_distance (200k bases, k=21) | 40.18 ms | 1287.49 ms | 32.04x faster |
-| alpha_diversity shannon (25k x 256) | 119.80 ms | 532.16 ms | 4.44x faster |
-| alpha_diversity observed (25k x 256) | 194.24 ms | 248.01 ms | 1.28x faster |
-| beta_diversity braycurtis (800 x 256) | 16.05 ms | 94.82 ms | 5.91x faster |
-| beta_diversity jaccard (800 x 256) | 102.09 ms | 279.09 ms | 2.73x faster |
+| hamming (5M bases) | 0.50 ms | 6.01 ms | 12.08x faster |
+| kmer_distance (200k bases, k=21) | 47.57 ms | 1095.67 ms | 23.03x faster |
+| alpha_diversity shannon (25k x 256) | 59.37 ms | 511.55 ms | 8.62x faster |
+| alpha_diversity observed (25k x 256) | 54.05 ms | 268.30 ms | 4.96x faster |
+| beta_diversity braycurtis (800 x 256) | 12.83 ms | 89.44 ms | 6.97x faster |
+| beta_diversity jaccard (800 x 256) | 15.68 ms | 183.46 ms | 11.70x faster |
 
-The pairwise kernels parallelize independent sample rows, while named batched
-alpha metrics avoid Python-per-sample dispatch. No GPU path is provided or
-claimed.
+Large pairwise and batched-alpha workloads parallelize independent sample rows;
+smaller workloads stay serial to avoid thread-launch overhead. Observed and
+Shannon alpha reductions and the Jaccard pair reduction use SIMD with scalar
+tails. Validated `int64` observed/Shannon inputs remain zero-copy, and
+qualitative beta inputs use a compact one-byte presence buffer.
+
+No GPU path is provided. The covered kernels do not reach the approximately
+two-flop-per-byte arithmetic intensity needed to justify host/device transfer:
+the most compute-heavy benchmarked reduction, Shannon, performs one logarithm
+and a small number of arithmetic operations per eight-byte input, while the
+pairwise and sequence kernels are bandwidth-bound or use irregular hash-table
+access.
 
 ## How it works
 
@@ -139,7 +148,7 @@ The k-mer kernel uses a caller-owned open-addressed hash table. Each occupied
 slot stores a representative sequence position, and equal hashes are verified
 byte-for-byte. Hash collisions therefore affect probing cost, not correctness.
 
-The test suite contains 314 tests and parameterized parity cases against real
+The test suite contains 323 tests and parameterized parity cases against real
 scikit-bio 0.7.3. Results using the nightly Mojo `log`, `exp`, or `pow`
 implementations are checked with tight numerical tolerances.
 
