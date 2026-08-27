@@ -1,6 +1,5 @@
 """Sequence distance and ecological diversity kernels."""
 
-from std.algorithm.functional import parallelize
 from std.math import exp, log, pow, sqrt
 from std.sys.info import simd_width_of
 
@@ -336,11 +335,8 @@ def msb_alpha_batch(
             counts + row * columns, columns, code, parameter1, parameter2, flag
         )
 
-    if rows * columns >= 100_000:
-        parallelize(calculate, rows, min(rows, 16))
-    else:
-        for row in range(rows):
-            calculate(row)
+    for row in range(rows):
+        calculate(row)
 
 
 def braycurtis_pair(a: FPtr, b: FPtr, n: Int) -> Float64:
@@ -490,8 +486,5 @@ def msb_beta(
             result[row * rows + other] = value
             result[other * rows + row] = value
 
-    if rows * rows * columns >= 250_000:
-        parallelize(calculate_row, rows, min(rows, 16))
-    else:
-        for row in range(rows):
-            calculate_row(row)
+    for row in range(rows):
+        calculate_row(row)
