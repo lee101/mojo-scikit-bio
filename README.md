@@ -117,11 +117,11 @@ were measured on an Intel Xeon E5-2697 v4 at 2.30 GHz, Linux
 | beta_diversity braycurtis (800 x 256) | 12.83 ms | 89.44 ms | 6.97x faster |
 | beta_diversity jaccard (800 x 256) | 15.68 ms | 183.46 ms | 11.70x faster |
 
-Large pairwise and batched-alpha workloads parallelize independent sample rows;
-smaller workloads stay serial to avoid thread-launch overhead. Observed and
-Shannon alpha reductions and the Jaccard pair reduction use SIMD with scalar
-tails. Validated `int64` observed/Shannon inputs remain zero-copy, and
-qualitative beta inputs use a compact one-byte presence buffer.
+Large pairwise and batched-alpha workloads loop over independent sample rows
+inside the kernel; the work per row is far too small to be worth a hand-off.
+Observed and Shannon alpha reductions and the Jaccard pair reduction use SIMD
+with scalar tails. Validated `int64` observed/Shannon inputs remain zero-copy,
+and qualitative beta inputs use a compact one-byte presence buffer.
 
 No GPU path is provided. The covered kernels do not reach the approximately
 two-flop-per-byte arithmetic intensity needed to justify host/device transfer:

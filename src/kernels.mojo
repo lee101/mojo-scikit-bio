@@ -1,6 +1,5 @@
 """Sequence distance and ecological diversity kernels."""
 
-from max.algorithm import sync_parallelize
 from std.math import exp, log, pow, sqrt
 from std.sys.info import simd_width_of as simdwidthof
 
@@ -11,9 +10,6 @@ comptime I64Ptr = UnsafePointer[Int64, AnyOrigin[mut=True]]
 comptime BW = simdwidthof[DType.uint8]()
 comptime FW = simdwidthof[DType.float64]()
 comptime IW = simdwidthof[DType.int64]()
-comptime ALPHA_PARALLEL_THRESHOLD = 262_144
-comptime BETA_PARALLEL_THRESHOLD = 1_048_576
-
 
 def fp(addr: Int) -> FPtr:
     return FPtr(unsafe_from_address=addr)
@@ -431,17 +427,10 @@ def msb_alpha_batch(
     var counts = fp(counts_addr)
     var result = fp(result_addr)
 
-    @parameter
-    def calculate(row: Int):
+    for row in range(rows):
         result[row] = alpha_value(
             counts + row * columns, columns, code, parameter1, parameter2, flag
         )
-
-    if rows * columns >= ALPHA_PARALLEL_THRESHOLD and rows > 1:
-        sync_parallelize[calculate](rows)
-    else:
-        for row in range(rows):
-            calculate(row)
 
 
 @export("msb_alpha_batch_i64")
@@ -457,8 +446,7 @@ def msb_alpha_batch_i64(
     var counts = i64p(counts_addr)
     var result = fp(result_addr)
 
-    @parameter
-    def calculate(row: Int):
+    for row in range(rows):
         var row_counts = counts + row * columns
         if code == 0:
             result[row] = alpha_observed_i64(row_counts, columns)
@@ -466,12 +454,6 @@ def msb_alpha_batch_i64(
             result[row] = alpha_shannon_i64(
                 row_counts, columns, parameter1, flag
             )
-
-    if rows * columns >= ALPHA_PARALLEL_THRESHOLD and rows > 1:
-        sync_parallelize[calculate](rows)
-    else:
-        for row in range(rows):
-            calculate(row)
 
 
 def braycurtis_pair(a: FPtr, b: FPtr, n: Int) -> Float64:
@@ -666,8 +648,7 @@ def msb_beta(
     var counts = fp(counts_addr)
     var result = fp(result_addr)
 
-    @parameter
-    def calculate_row(row: Int):
+    for row in range(rows):
         result[row * rows + row] = 0.0
         for other in range(row + 1, rows):
             var value = beta_pair(
@@ -679,13 +660,6 @@ def msb_beta(
             )
             result[row * rows + other] = value
             result[other * rows + row] = value
-
-    var pair_work = rows * (rows - 1) // 2 * columns
-    if pair_work >= BETA_PARALLEL_THRESHOLD and rows > 1:
-        sync_parallelize[calculate_row](rows)
-    else:
-        for row in range(rows):
-            calculate_row(row)
 
 
 @export("msb_beta_bool")
@@ -699,8 +673,7 @@ def msb_beta_bool(
     var counts = bp(counts_addr)
     var result = fp(result_addr)
 
-    @parameter
-    def calculate_row(row: Int):
+    for row in range(rows):
         result[row * rows + row] = 0.0
         for other in range(row + 1, rows):
             var value = qualitative_pair(
@@ -711,10 +684,3 @@ def msb_beta_bool(
             )
             result[row * rows + other] = value
             result[other * rows + row] = value
-
-    var pair_work = rows * (rows - 1) // 2 * columns
-    if pair_work >= BETA_PARALLEL_THRESHOLD and rows > 1:
-        sync_parallelize[calculate_row](rows)
-    else:
-        for row in range(rows):
-            calculate_row(row)
